@@ -557,11 +557,13 @@ class OpenSTAStep(OpenROADStep):
         libs: Tuple[str, ...]
         netlists: Tuple[str, ...]
         spefs: Tuple[Tuple[str, str], ...]
+        pad_libs: Tuple[str, ...] = ()
         extra_spefs_backcompat: Optional[Tuple[Tuple[str, str], ...]] = None
         current_corner_spef: Optional[str] = None
 
         def set_env(self, env: Dict[str, Any]):
             env["_CURRENT_CORNER_LIBS"] = TclStep.value_to_tcl(self.libs)
+            env["_CURRENT_CORNER_PAD_LIBS"] = TclStep.value_to_tcl(self.pad_libs)
             env["_CURRENT_CORNER_NETLISTS"] = TclStep.value_to_tcl(self.netlists)
             env["_CURRENT_CORNER_SPEFS"] = TclStep.value_to_tcl(self.spefs)
             if self.extra_spefs_backcompat is not None:
@@ -594,6 +596,12 @@ class OpenSTAStep(OpenROADStep):
             prioritize_nl=prioritize_nl,
             timing_corner=timing_corner,
         )
+
+        pad_libs: List[Path] = []
+        if pad_libs_by_corner := self.config.get("PAD_LIBS"):
+            pad_libs = self.toolbox.filter_views(
+                self.config, pad_libs_by_corner, timing_corner
+            )
         state_in = self.state_in.result()
 
         name = timing_corner
@@ -656,6 +664,7 @@ class OpenSTAStep(OpenROADStep):
             name,
             OpenSTAStep.CornerFileList(
                 libs=tuple([str(lib) for lib in libs]),
+                pad_libs=tuple([str(lib) for lib in pad_libs]),
                 netlists=tuple([str(netlist) for netlist in netlists]),
                 spefs=tuple([(pair[0], str(pair[1])) for pair in spefs]),
                 extra_spefs_backcompat=extra_spefs_backcompat,

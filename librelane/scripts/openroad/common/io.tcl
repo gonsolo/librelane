@@ -236,8 +236,8 @@ proc read_timing_info {args} {
         }
     }
     
-    if { [info exists ::env(PAD_LIBS) ] } {
-        foreach lib $::env(PAD_LIBS) {
+    if { [info exists ::env(_CURRENT_CORNER_PAD_LIBS) ] } {
+        foreach lib $::env(_CURRENT_CORNER_PAD_LIBS) {
             puts "Reading gpio pad timing for the '$corner_name' corner at '$lib'…"
             read_liberty -corner $corner_name $lib
         }
@@ -344,8 +344,8 @@ proc read_pnr_libs {args} {
             }
         }
         
-        if { [info exists ::env(PAD_LIBS) ] } {
-            foreach pad_lib $::env(PAD_LIBS) {
+        if { [info exists ::env(_CURRENT_CORNER_PAD_LIBS) ] } {
+            foreach pad_lib $::env(_CURRENT_CORNER_PAD_LIBS) {
                 puts "Reading gpio pad timing library for the '$corner_name' corner at '$pad_lib'…"
                 read_liberty -corner $corner_name $pad_lib
             }
