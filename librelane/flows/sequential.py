@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import fnmatch
+from concurrent.futures import Future
 from typing import (
     Iterable,
     List,
@@ -30,7 +31,7 @@ from deprecated.sphinx import deprecated
 from rapidfuzz import process, fuzz, utils
 
 from .flow import Flow, FlowException, FlowError
-from ..common import Filter
+from ..common import Filter, GenericImmutableDict
 from ..state import State
 from ..logging import info, success, debug
 from ..steps import (
@@ -103,6 +104,32 @@ class SequentialFlow(Flow):
     Substitutions: Optional[SubstitutionsObject] = None
     gating_config_vars: Dict[str, List[str]] = {}
 
+    AsyncSteps: Dict[str, str] = {}
+    """
+    A mapping from a Step ID to another Step ID: the *key* Step is started
+    asynchronously via :meth:`Flow.start_step_async` instead of blocking the
+    main sequential execution, and does not update the flow's running
+    ``State`` immediately. Its result is only joined back in -- and any
+    ``StepError``/``DeferredStepError`` it raised is only surfaced -- right
+    before the *value* Step (its declared "join point") executes, merging in
+    its metrics.
+
+    Only Steps with no declared :attr:`.Step.outputs` may be used as an
+    asynchronous Step's key: their result cannot usefully be threaded into
+    ``state_in`` for whichever Steps run while they're still in flight, so
+    any new ``DesignFormat`` view they claimed to produce would silently
+    never reach later Steps. This is validated at class definition time.
+
+    Use this for independent verification/signoff Steps -- ones that don't
+    produce a ``DesignFormat`` view consumed by another Step in between --
+    so their wall-clock cost can overlap with unrelated Steps that run
+    while they're still working, instead of always stacking serially. A
+    real example: ``Magic.DRC`` and ``Magic.SpiceExtraction``/
+    ``Netgen.LVS`` are both independent verification passes over the same
+    finished layout -- see :class:`.Classic`'s ``AsyncSteps`` for how this
+    is used in practice.
+    """
+
     def __init__(
         self,
         *args,
@@ -117,6 +144,7 @@ class SequentialFlow(Flow):
         Self.Steps = Self.Steps.copy()  # Break global reference
         Self.config_vars = Self.config_vars.copy()
         Self.gating_config_vars = Self.gating_config_vars.copy()
+        Self.AsyncSteps = Self.AsyncSteps.copy()
         Self.__normalize_step_ids(Self)
         if Self.Substitutions:
             Self.__substitute_in_place(Self, Self.Substitutions)
@@ -144,6 +172,35 @@ class SequentialFlow(Flow):
                     raise TypeError(
                         f"Gating variable '{var_name}' in Flow '{Self.__qualname__}' is not a Boolean"
                     )
+
+        # Validate AsyncSteps
+        steps_by_id = {step.id: step for step in Self.Steps}
+        step_order = {step.id: i for i, step in enumerate(Self.Steps)}
+        for async_id, join_id in Self.AsyncSteps.items():
+            async_step = steps_by_id.get(async_id)
+            if async_step is None:
+                raise TypeError(
+                    f"AsyncSteps key '{async_id}' does not match any Step in "
+                    f"Flow '{Self.__qualname__}'"
+                )
+            if join_id not in steps_by_id:
+                raise TypeError(
+                    f"AsyncSteps join point '{join_id}' for Step '{async_id}' "
+                    f"does not match any Step in Flow '{Self.__qualname__}'"
+                )
+            if len(async_step.outputs) != 0:
+                raise TypeError(
+                    f"AsyncSteps key '{async_id}' declares DesignFormat outputs "
+                    f"{[o.id for o in async_step.outputs]}, which is not "
+                    "supported: an asynchronous Step's result cannot be "
+                    "threaded into state_in for Steps that run while it's "
+                    "still in flight."
+                )
+            if step_order[async_id] >= step_order[join_id]:
+                raise TypeError(
+                    f"AsyncSteps join point '{join_id}' for Step '{async_id}' "
+                    f"must come after it in Flow '{Self.__qualname__}'.Steps"
+                )
 
     @classmethod
     def Make(Self, step_ids: List[str]) -> Type[SequentialFlow]:
@@ -349,8 +406,37 @@ class SequentialFlow(Flow):
             for id in Filter([key]).filter(step_ids.values()):
                 gating_cvars_expanded[id] = value
 
+        # Steps started via AsyncSteps: id -> (Step, Future[State]), awaited
+        # and merged into current_state right before their declared join
+        # point runs (or, for any left outstanding, once the loop ends).
+        pending: Dict[str, Tuple[Step, "Future[State]"]] = {}
+
+        def join_pending(step_id: str) -> None:
+            nonlocal current_state
+            for async_id, join_id in self.AsyncSteps.items():
+                if join_id != step_id or async_id not in pending:
+                    continue
+                async_step, future = pending.pop(async_id)
+                try:
+                    async_state = future.result()
+                except StepException as e:
+                    raise FlowException(str(e)) from None
+                except DeferredStepError as e:
+                    deferred_errors.append(str(e))
+                    continue
+                except StepError as e:
+                    raise FlowError(str(e)) from None
+                current_state = State(
+                    current_state,
+                    metrics=GenericImmutableDict(
+                        current_state.metrics,
+                        overrides=async_state.metrics,
+                    ),
+                )
+
         current_state = initial_state
         for cls in self.Steps:
+            join_pending(cls.id)
             step = cls(config=self.config, state_in=current_state)
             if frm_resolved is not None and frm_resolved == step.id:
                 executing = True
@@ -377,6 +463,13 @@ class SequentialFlow(Flow):
                     )
                 )
                 break
+            elif cls.id in self.AsyncSteps:
+                step_list.append(step)
+                pending[cls.id] = (step, self.start_step_async(step))
+                # current_state is deliberately not updated here -- this
+                # step's only observable effect (its metrics; AsyncSteps
+                # validation requires empty `outputs`) is merged in later,
+                # by join_pending(), right before its declared join point.
             else:
                 step_list.append(step)
                 try:
@@ -395,6 +488,12 @@ class SequentialFlow(Flow):
 
             if to_resolved and to_resolved == step.id:
                 executing = False
+
+        # Any AsyncSteps entries whose join point was skipped/never reached
+        # (e.g. a --to cutoff) still need to be awaited, so their errors
+        # surface and no background thread is left dangling.
+        for async_id, (async_step, future) in list(pending.items()):
+            join_pending(self.AsyncSteps[async_id])
 
         assert self.run_dir is not None
         debug(f"Run concluded ▶ '{self.run_dir}'")
