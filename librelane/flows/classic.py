@@ -37,6 +37,23 @@ class Classic(SequentialFlow):
     This is the default when using LibreLane via the command-line.
     """
 
+    AsyncSteps = {
+        # Magic.DRC (geometric design-rule checking) and
+        # Magic.SpiceExtraction -> Netgen.LVS (netlist-vs-layout) are both
+        # independent verification passes over the same finished layout --
+        # confirmed via their declared inputs/outputs (Magic.DRC:
+        # [DEF?, GDS] -> [], SpiceExtraction: [GDS, DEF] -> [SPICE],
+        # Netgen.LVS: [SPICE, POWERED_NETLIST] -> [], where POWERED_NETLIST
+        # comes from Odb.SetPowerConnections, not from DRC). Magic.DRC is
+        # also typically the single most expensive step in a full signoff
+        # run, so starting it in the background and letting the
+        # SpiceExtraction/LVS chain run in the foreground while it's still
+        # working -- instead of always stacking their wall-clock cost --
+        # is a real, low-risk win. See SequentialFlow.AsyncSteps for the
+        # general mechanism this relies on.
+        "Magic.DRC": "Checker.MagicDRC",
+    }
+
     Steps = [
         Verilator.Lint,
         Checker.LintTimingConstructs,
@@ -106,12 +123,18 @@ class Classic(SequentialFlow):
         Checker.XOR,
         Magic.DRC,
         KLayout.DRC,
-        Checker.MagicDRC,
         Checker.KLayoutDRC,
         Magic.SpiceExtraction,
         Checker.IllegalOverlap,
         Netgen.LVS,
         Checker.LVS,
+        # Moved here (was straight after Magic.DRC/KLayout.DRC) so
+        # Magic.DRC -- the single most expensive step in a real signoff run,
+        # and independent of the SpiceExtraction/LVS chain above (neither
+        # consumes the other's output, verified via their declared
+        # inputs/outputs) -- has real work to overlap with. See AsyncSteps
+        # below.
+        Checker.MagicDRC,
         Yosys.EQY,
         Checker.SetupViolations,
         Checker.HoldViolations,

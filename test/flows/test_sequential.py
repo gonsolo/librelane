@@ -423,3 +423,117 @@ def test_gating_validation(MetricIncrementer):
 
         class _Test2(Dummy):
             gating_config_vars = {"Test.MetricIncrementer": ["BAD_GATING_VARIABLE"]}
+\n
+
+@pytest.mark.usefixtures("_mock_conf_fs")
+@mock_variables([flow_module, sequential_flow_module, step_module])
+def test_async_steps_overlap():
+    """
+    Proves AsyncSteps actually overlaps execution, not just that it doesn't
+    crash: BlockingCheck can only complete once Unblocker (a *later* Step in
+    the main sequential line) sets an Event. If AsyncSteps' launch of
+    BlockingCheck were accidentally synchronous, Unblocker would never get a
+    chance to run first, and BlockingCheck's own bounded wait() would time
+    out and fail the test deterministically rather than hang it.
+    """
+    import threading
+    from librelane.flows import SequentialFlow
+
+    unblock = threading.Event()
+
+    @Step.factory.register()
+    class BlockingCheck(Step):
+        id = "Test.BlockingCheck"
+        inputs = []
+        outputs = []
+
+        def run(self, state_in, **kwargs):
+            if not unblock.wait(timeout=5):
+                raise TimeoutError(
+                    "Test.BlockingCheck was not started concurrently -- "
+                    "Test.Unblocker never got a chance to run first"
+                )
+            return {}, {"drc_ran": True}
+
+    @Step.factory.register()
+    class Unblocker(Step):
+        id = "Test.Unblocker"
+        inputs = []
+        outputs = []
+
+        def run(self, state_in, **kwargs):
+            unblock.set()
+            return {}, {}
+
+    @Step.factory.register()
+    class JoinPoint(Step):
+        id = "Test.JoinPoint"
+        inputs = []
+        outputs = []
+
+        def run(self, state_in, **kwargs):
+            return {}, {}
+
+    class Dummy(SequentialFlow):
+        AsyncSteps = {"Test.BlockingCheck": "Test.JoinPoint"}
+        Steps = [BlockingCheck, Unblocker, JoinPoint]
+
+    flow = Dummy(
+        {
+            "DESIGN_NAME": "WHATEVER",
+            "VERILOG_FILES": ["/cwd/src/a.v"],
+        },
+        design_dir="/cwd",
+        pdk="dummy",
+        scl="dummy_scl",
+        pdk_root="/pdk",
+    )
+
+    state = flow.start()
+    assert state.metrics["drc_ran"] is True, (
+        "AsyncSteps did not merge the asynchronous step's metrics in "
+        "before its declared join point ran"
+    )
+
+
+@pytest.mark.usefixtures("_mock_conf_fs")
+@mock_variables([flow_module, sequential_flow_module, step_module])
+def test_async_steps_validation(MetricIncrementer):
+    from librelane.flows import SequentialFlow
+
+    @Step.factory.register()
+    class HasOutputs(Step):
+        id = "Test.HasOutputs"
+        inputs = []
+        from librelane.state import DesignFormat
+
+        outputs = [DesignFormat.NETLIST]
+
+        def run(self, state_in, **kwargs):
+            return {}, {}
+
+    class Dummy(SequentialFlow):
+        Steps = [MetricIncrementer, HasOutputs]
+
+    with pytest.raises(TypeError, match="does not match any Step"):
+
+        class _Test1(Dummy):
+            AsyncSteps = {"Test.DoesNotExist": "Test.MetricIncrementer"}
+
+    with pytest.raises(TypeError, match="does not match any Step"):
+
+        class _Test2(Dummy):
+            AsyncSteps = {"Test.MetricIncrementer": "Test.DoesNotExist"}
+
+    with pytest.raises(TypeError, match="is not supported"):
+
+        class _Test3(Dummy):
+            AsyncSteps = {"Test.HasOutputs": "Test.MetricIncrementer"}
+
+    with pytest.raises(TypeError, match="must come after it"):
+        # Test.MetricIncrementer has no outputs (so it clears that check),
+        # declared async with a join point that comes *before* it in this
+        # order -- isolates the ordering check from the outputs check.
+        class _Test4(Dummy):
+            Steps = [HasOutputs, MetricIncrementer]
+            AsyncSteps = {"Test.MetricIncrementer": "Test.HasOutputs"}
