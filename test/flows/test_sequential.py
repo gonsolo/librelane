@@ -423,7 +423,6 @@ def test_gating_validation(MetricIncrementer):
 
         class _Test2(Dummy):
             gating_config_vars = {"Test.MetricIncrementer": ["BAD_GATING_VARIABLE"]}
-\n
 
 @pytest.mark.usefixtures("_mock_conf_fs")
 @mock_variables([flow_module, sequential_flow_module, step_module])
