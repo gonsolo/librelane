@@ -49,12 +49,29 @@ append_if_flag hold_args PL_RESIZER_ALLOW_SETUP_VIOS -allow_setup_violations
 append_if_exists_argument hold_args PL_RESIZER_HOLD_REPAIR_TNS_PCT -repair_tns
 append_if_exists_argument hold_args PL_RESIZER_HOLD_MAX_UTIL_PCT -max_utilization
 
-if { $::env(PL_RESIZER_FIX_HOLD_FIRST) == 1 } {
+# Cells excluded everywhere else (setup fixing, general buffering) but
+# meant to be used for hold repair specifically -- see
+# PL_RESIZER_HOLD_ONLY_CELLS. Relaxed only around the hold repair_timing
+# call below, then restored immediately after so no other pass in this or
+# later scripts sees them as usable.
+set hold_only_cells $::env(_PL_RESIZER_HOLD_ONLY_CELLS)
+
+proc repair_hold_with_relaxed_cells { hold_args hold_only_cells } {
+    if { [llength $hold_only_cells] > 0 } {
+        unset_dont_use $hold_only_cells
+    }
     log_cmd repair_timing {*}$hold_args
+    if { [llength $hold_only_cells] > 0 } {
+        set_dont_use $hold_only_cells
+    }
+}
+
+if { $::env(PL_RESIZER_FIX_HOLD_FIRST) == 1 } {
+    repair_hold_with_relaxed_cells $hold_args $hold_only_cells
     log_cmd repair_timing {*}$setup_args
 } else {
     log_cmd repair_timing {*}$setup_args
-    log_cmd repair_timing {*}$hold_args
+    repair_hold_with_relaxed_cells $hold_args $hold_only_cells
 }
 
 # Legalize

@@ -2786,10 +2786,31 @@ class ResizerTimingPostCTS(ResizerStep):
             "Experimental: attempt to fix hold violations before setup violations, which may lead to better timing results.",
             default=False,
         ),
+        Variable(
+            "PL_RESIZER_HOLD_ONLY_CELLS",
+            Optional[List[str]],
+            "Cells that are excluded from setup fixing and general buffering "
+            "(by PNR_EXCLUDED_CELL_FILE / EXTRA_EXCLUDED_CELLS) but should "
+            "still be available to this step's hold-fixing pass. Intended for "
+            "cell families whose only legitimate job is adding hold margin "
+            "(e.g. dedicated delay cells): excluding them everywhere else "
+            "stops the setup/buffering passes from misusing them as ordinary "
+            "repeaters, while this restores them for the one pass that is "
+            "actually supposed to use them. The dont-use relaxation is scoped "
+            "to the hold repair_timing call in this script only; every other "
+            "step still excludes these cells via the normal mechanism.",
+        ),
     ]
 
     def get_script_path(self):
         return os.path.join(get_script_dir(), "openroad", "rsz_timing_postcts.tcl")
+
+    def prepare_env(self, env: dict, state: State) -> dict:
+        env = super().prepare_env(env, state)
+        env["_PL_RESIZER_HOLD_ONLY_CELLS"] = TclUtils.join(
+            self.config["PL_RESIZER_HOLD_ONLY_CELLS"] or []
+        )
+        return env
 
 
 @Step.factory.register()
